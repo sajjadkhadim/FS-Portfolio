@@ -3,11 +3,18 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
+const path = require('path');
+const orderService = require('./services/orderService');
 
 const app = express();
 const port = 3000;
 
 app.use(bodyParser.json());
+
+// MongoDB Setup
+mongoose.connect('mongodb://localhost:27017/orderentry', { useNewUrlParser: true, useUnifiedTopology: true });
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'MongoDB connection error:'));
 
 // Swagger Setup
 const swaggerOptions = {
@@ -19,7 +26,7 @@ const swaggerOptions = {
       description: 'API documentation for Order Entry module'
     }
   },
-  apis: ['./server.js']
+   apis: [path.join(__dirname, 'server.js')]
 };
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
@@ -40,11 +47,34 @@ const processOrderLegacy = (order) => {
   });
 };
 
-// Use Case 1: Create Trade Order
+/**
+ * @swagger
+ * /api/orders:
+ *   post:
+ *     summary: Create a trade order
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fundName:
+ *                 type: string
+ *               transactionType:
+ *                 type: string
+ *               quantity:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Order created
+ *       400:
+ *         description: Validation error
+ *       500:
+ *         description: Legacy system error
+ */
 app.post('/api/orders', async (req, res) => {
   const { fundName, transactionType, quantity } = req.body;
-
-  // Input validation
   if (!funds.includes(fundName)) {
     return res.status(400).json({ message: 'Invalid Security Name' });
   }
@@ -55,52 +85,75 @@ app.post('/api/orders', async (req, res) => {
     return res.status(400).json({ message: 'Invalid Quantity' });
   }
 
-  // Mock Order Value computation
-  const orderValue = quantity * 100; // assuming unit price = 100
-  const newOrder = {
-    id: orderIdCounter++,
-    fundName,
-    transactionType,
-    quantity,
-    orderValue,
-    status: 'Submitted',
-    createdAt: new Date().toISOString()
-  };
-  orders.push(newOrder);
-
-  // Save audit action (mock)
-  console.log(`AUDIT: Order ${newOrder.id} created by user.`);
-
-  // Submit to legacy system
   try {
+    const newOrder = await orderService.createOrder(fundName, transactionType, quantity);
+    console.log(`AUDIT: Order ${newOrder._id} created by user.`);
+
     const processedOrder = await processOrderLegacy(newOrder);
     processedOrder.status = 'Completed';
+    await orderService.updateOrderStatus(processedOrder._id, 'Completed');
     return res.status(201).json(processedOrder);
   } catch (err) {
-    newOrder.status = 'Failed';
+    await orderService.updateOrderStatus(newOrder._id, 'Failed');
     return res.status(500).json({ message: 'Legacy system error. Please try again later.' });
   }
 });
 
-// Use Case 2: View Available Funds
+/**
+ * @swagger
+ * /api/funds:
+ *   get:
+ *     summary: View available funds
+ *     responses:
+ *       200:
+ *         description: List of funds
+ */
 app.get('/api/funds', (req, res) => {
   return res.json(funds);
 });
 
-// Use Case 3: Cancel Order
-app.post('/api/orders/:id/cancel', (req, res) => {
-  const order = orders.find(o => o.id === parseInt(req.params.id));
+/**
+ * @swagger
+ * /api/orders/{id}/cancel:
+ *   post:
+ *     summary: Cancel an order
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Order cancelled
+ *       404:
+ *         description: Order not found
+ *       400:
+ *         description: Invalid cancellation request
+ */
+app.post('/api/orders/:id/cancel', async (req, res) => {
+  const order = await orderService.getOrderById(req.params.id);
   if (!order) return res.status(404).json({ message: 'Order not found' });
   if (order.status !== 'Submitted') return res.status(400).json({ message: 'Order cannot be cancelled' });
 
-  order.status = 'Cancelled';
-  console.log(`AUDIT: Order ${order.id} cancelled.`);
+  await orderService.updateOrderStatus(order._id, 'Cancelled');
+  console.log(`AUDIT: Order ${order._id} cancelled.`);
   return res.json(order);
 });
 
-// Use Case 4: View All Orders
-app.get('/api/orders', (req, res) => {
-  return res.json(orders);
+
+/**
+ * @swagger
+ * /api/orders:
+ *   get:
+ *     summary: View all orders
+ *     responses:
+ *       200:
+ *         description: List of orders
+ */
+app.get('/api/orders', async (req, res) => {
+   const allOrders = await orderService.getAllOrders();
+  return res.json(allOrders);
 });
 
 app.listen(port, () => {
